@@ -6,6 +6,7 @@ use Log::Log4perl qw(get_logger :levels);
 use IO::Socket;
 use POSIX qw(WNOHANG);
 use Data::UUID;
+use Data::Dumper;
 
 use lib '../utils/lib';
 use MyDB;
@@ -60,24 +61,31 @@ $SIG = sub {
 	}
 };
 
-my $port = $config_vars->{'listen_port'};
+my $general_port = $config_vars->{'general_listen_port'};
+my $software_port = $config_vars->{'software_listen_port'};
 
 my $sock = IO::Socket::INET->new( 
 	Listen    => 20,
-	LocalPort => $port,
+	LocalPort => $general_port,
 	Timeout   => 60*1,
 	Reuse     => 1
 );
-if (!$sock) {
+if(!$sock) {
 	$saserver_logger->fatal("Can't create listening socket: $!\n");
 	exit 1;
 }
 
-$saserver_logger->info("SA server starts up on port $port ...\n");
+$saserver_logger->info("SA server starts up on port $general_port ...\n");
 
-while (1) {
-	next unless my $session = $sock->accept;
-	defined (my $pid = fork) or die "Can't fork: $!\n";
+my ($stat, $err) = start_sw_process($sa_db, $software_port);
+if ($stat eq "error") {
+	print "$err\n";
+	exit 1;
+}
+
+while(1) {
+    next unless my $session = $sock->accept;
+    defined (my $pid = fork) or die "Can't fork: $!\n";
 
 	if($pid == 0) {
         my $peer_ip = $session->peerhost;
@@ -164,6 +172,58 @@ sub register_client {
             or return ("error", "Couldn't execute statement: " . $sth->errstr);
         return ("updated", "");
     }
+}
+
+sub start_sw_process {
+    my $db = shift;
+    my $port = shift;
+
+	defined(my $pid = fork) or return("error", "Can't fork: $!");
+
+    if($pid == 0) {
+        my ($stat, $err) = get_dbh($db);
+        exit 0 if($stat ne "ok");
+        my $dbh = $err;
+
+        while(1) {
+            my $sql = "SELECT ssq.id as id,ssq.sw_name as software,ms.ip as ip FROM server_software_queue ssq LEFT JOIN managed_server ms on ssq.id=ms.id";
+            my $sth = $dbh->prepare($sql) or exit 1;
+            $sth->execute() or exit 1;
+
+            while(my $ref = $sth->fetchrow_hashref) {
+                if(open(IN, "../software_repo/" . $ref->{"id"} . "/" . $ref->{"software"})) {
+                    my $sock = IO::Socket::INET->new( 
+                        PeerAddr => $ref->{"ip"},
+                        PeerPort => $port,
+                        Proto    => 'tcp'
+                    );
+                    next if(!$sock);
+
+                    print $sock $ref->{"software"} . "\n";
+
+                    my $buf = <$sock>;
+                    $buf =~ s/[\s ]+$//g;
+                    if($buf eq "got file name") {
+                        binmode(IN);
+                        my @out = <IN>;
+                        print $sock @out;
+
+                        close IN;
+                        close $sock;
+
+                        my $sql = "DELETE FROM server_software_queue where id='" .$ref->{"id"}. "' AND sw_name='" .$ref->{"software"}. "'";
+                        next unless my $sth = $dbh->prepare($sql);
+                        next unless $sth->execute();
+                    }
+                }
+            }
+        }
+
+        $dbh->disconnect;
+		exit 0;
+    }
+
+    return ("ok", "Forking child $pid");
 }
 
 sub usage {
