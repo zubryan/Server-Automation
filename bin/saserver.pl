@@ -191,7 +191,7 @@ sub start_sw_process {
             $sth->execute() or exit 1;
 
             while(my $ref = $sth->fetchrow_hashref) {
-                if(open(IN, "../software_repo/" . $ref->{"id"} . "/" . $ref->{"software"})) {
+                if(open(IN, "../software_repo/" . $ref->{"software"})) {
                     my $sock = IO::Socket::INET->new( 
                         PeerAddr => $ref->{"ip"},
                         PeerPort => $port,
@@ -214,8 +214,14 @@ sub start_sw_process {
                         my $sql = "DELETE FROM server_software_queue where id='" .$ref->{"id"}. "' AND sw_name='" .$ref->{"software"}. "'";
                         next unless my $sth = $dbh->prepare($sql);
                         next unless $sth->execute();
+
+                        $sql = "INSERT INTO server_software VALUES ('" .$ref->{"id"}. "','" .$ref->{"software"}. "','0',now())";
+                        next unless $sth = $dbh->prepare($sql);
+                        next unless $sth->execute();
                     }
                 }
+
+                sleep(10);
             }
         }
 
